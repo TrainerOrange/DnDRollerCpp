@@ -86,12 +86,13 @@ int getSPcores(cudaDeviceProp devProp)
 
 int main() {
     cudaDeviceProp cudaDeviceProp;
-    cudaGetDeviceProperties(&cudaDeviceProp, 1);
+    cudaGetDeviceProperties(&cudaDeviceProp, 0);
     int nrCores = getSPcores(cudaDeviceProp);
+    std::cout << "ShaderCores: " << nrCores << "\n";
 
     // After how many rolls should you stop
     unsigned long long int counter = 0;
-    unsigned long long int counterstop = (unsigned long long int)(INT32_MAX/512) *N * nrCores;
+    unsigned long long int counterstop = (unsigned long long int)(INT32_MAX/512) * nrCores;
 
     // Cuda performance metrics
     cudaEvent_t start, stop;
@@ -99,9 +100,9 @@ int main() {
     cudaEventCreate(&stop);
 
 //    /* allocate an array of int8_t on the CPU and GPU */
-//    uint8_t cpu_nums[N * 4];
+//    uint8_t cpu_nums[ 4];
     uint8_t* gpu_nums;
-    cudaMalloc((void **) &gpu_nums,N * nrCores * 4 * sizeof(uint8_t));
+    cudaMalloc((void **) &gpu_nums, nrCores * 4 * sizeof(uint8_t));
 
     /* allocate an array of int8_t on the CPU and GPU */
     unsigned long long int cpu_pass_counter[1];
@@ -121,25 +122,25 @@ int main() {
 
     /* allocate space on the GPU for the random states */
     curandState_t* states;
-    cudaMalloc((void **) &states,N * nrCores * sizeof(curandState_t));
+    cudaMalloc((void **) &states, nrCores * sizeof(curandState_t));
 
     /* invoke the GPU to initialize all of the random states */
-    init<<<N, 1>>>(time(nullptr), states);
+    init<<<nrCores, 1>>>(time(nullptr), states);
 
     auto start_timer = std::chrono::system_clock::now();
     printLoadingBar(counter, counterstop, start_timer.time_since_epoch().count());
     cudaEventRecord(start);
     while (counter < counterstop) {
         /* invoke the kernel to get some random numbers */
-        randoms<<<N, 1>>>(states, gpu_nums);
-        passcheck<<<N, 4>>>(gpu_pass_counter, gpu_num_to_roll, gpu_nums);
+        randoms<<<nrCores, 1>>>(states, gpu_nums);
+        passcheck<<<nrCores, 4>>>(gpu_pass_counter, gpu_num_to_roll, gpu_nums);
 
         /* copy the random numbers back */
-//        cudaMemcpy(cpu_nums, gpu_nums,N * nrCores * 4 * sizeof(int8_t), cudaMemcpyDeviceToHost);
+//        cudaMemcpy(cpu_nums, gpu_nums, nrCores * 4 * sizeof(int8_t), cudaMemcpyDeviceToHost);
 //        cudaMemcpy(cpu_pass_counter, gpu_pass_counter, 1 * sizeof(int64_t), cudaMemcpyDeviceToHost);
 
-        counter +=N * nrCores*4;
-        if ((counter % ((N * 4) * 10000)) == 0) {
+        counter += nrCores*4;
+        if ((counter % (nrCores * 4 * 10000)) == 0) {
             printLoadingBar(counter, counterstop, start_timer.time_since_epoch().count());
         }
     }
