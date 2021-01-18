@@ -9,9 +9,9 @@
 #include <chrono>
 #include "cuda_runtime_api.h"
 
-#define N 1
-#define R 1
+#define N 8
 #define MAX 20
+#define PERCENTAGEINTERVAL 5
 
 /* this GPU kernel function is used to initialize the random states */
 __global__ void init(unsigned int seed, curandState_t* states) {
@@ -39,11 +39,11 @@ __global__ void passcheck(unsigned long long int* passcounter, int8_t* numbersto
     if (numbers[blockIdx.x * blockDim.x + threadIdx.x] >= numberstopass[0]) { atomicAdd(passcounter, 1); }
 }
 
-void printLoadingBar(unsigned long long int rolled, unsigned long long int counterStop, double start_time ) {
-    printf("Rolled: %lld%% ", (rolled * 100)/counterStop);
+void printLoadingBar(long long int rolled, long long int counterStop, double start_time ) {
+    printf("Rolled: %lld%% ", (long long int)ceil(rolled * 100/counterStop));
     auto end = std::chrono::system_clock::now().time_since_epoch().count();
     double diff = end - start_time;
-    printf(": %i rolls per second \n", (int)(((double)rolled * 10000000) / diff));
+    printf(": %lld rolls per second \n", (long long int)ceil(((double)rolled * 10000000) / diff));
 }
 
 // you must first call the cudaGetDeviceProperties() function, then pass
@@ -91,8 +91,8 @@ int main() {
     std::cout << "ShaderCores: " << nrCores << "\n";
 
     // After how many rolls should you stop
-    unsigned long long int counter = 0;
-    unsigned long long int counterstop = (unsigned long long int)(INT32_MAX/512) * nrCores;
+    long long int counter = 0;
+    long long int counterstop = (long long int)(INT32_MAX) * 2;
 
     // Cuda performance metrics
     cudaEvent_t start, stop;
@@ -102,7 +102,7 @@ int main() {
 //    /* allocate an array of int8_t on the CPU and GPU */
 //    uint8_t cpu_nums[ 4];
     uint8_t* gpu_nums;
-    cudaMalloc((void **) &gpu_nums, nrCores * 4 * sizeof(uint8_t));
+    cudaMalloc((void **) &gpu_nums, nrCores * N * 4 * sizeof(uint8_t));
 
     /* allocate an array of int8_t on the CPU and GPU */
     unsigned long long int cpu_pass_counter[1];
@@ -112,37 +112,39 @@ int main() {
     cudaMemcpy(gpu_pass_counter, cpu_pass_counter, 1 * sizeof(unsigned long long int), cudaMemcpyHostToDevice);
 
     /* allocate an array of int8_t on the CPU and GPU of numbers that should be checked against */
-    int8_t cpu_num_to_pass[R];
-    cpu_num_to_pass[0] = 20;
+    int8_t cpu_num_to_pass[1];
+    cpu_num_to_pass[0] = 11;
     int8_t* gpu_num_to_roll;
-    cudaMalloc((void **) &gpu_num_to_roll, R * sizeof(int8_t));
-    cudaMemcpy(gpu_num_to_roll, cpu_num_to_pass, R * sizeof(int8_t), cudaMemcpyHostToDevice);
+    cudaMalloc((void **) &gpu_num_to_roll, 1 * sizeof(int8_t));
+    cudaMemcpy(gpu_num_to_roll, cpu_num_to_pass, 1 * sizeof(int8_t), cudaMemcpyHostToDevice);
 
     cudaDeviceSynchronize();
 
     /* allocate space on the GPU for the random states */
     curandState_t* states;
-    cudaMalloc((void **) &states, nrCores * sizeof(curandState_t));
+    cudaMalloc((void **) &states, nrCores * N * sizeof(curandState_t));
 
     /* invoke the GPU to initialize all of the random states */
-    init<<<nrCores, 1>>>(time(nullptr), states);
+    init<<<nrCores * N, 1>>>(time(nullptr), states);
 
     auto start_timer = std::chrono::system_clock::now();
     printLoadingBar(counter, counterstop, start_timer.time_since_epoch().count());
     cudaEventRecord(start);
+    int loopcounter = 0;
     while (counter < counterstop) {
         /* invoke the kernel to get some random numbers */
-        randoms<<<nrCores, 1>>>(states, gpu_nums);
-        passcheck<<<nrCores, 4>>>(gpu_pass_counter, gpu_num_to_roll, gpu_nums);
+        randoms<<<nrCores * N, 1>>>(states, gpu_nums);
+        passcheck<<<nrCores * N, 4>>>(gpu_pass_counter, gpu_num_to_roll, gpu_nums);
 
         /* copy the random numbers back */
-//        cudaMemcpy(cpu_nums, gpu_nums, nrCores * 4 * sizeof(int8_t), cudaMemcpyDeviceToHost);
+//        cudaMemcpy(cpu_nums, gpu_nums, nrCores * N * 4 * sizeof(int8_t), cudaMemcpyDeviceToHost);
 //        cudaMemcpy(cpu_pass_counter, gpu_pass_counter, 1 * sizeof(int64_t), cudaMemcpyDeviceToHost);
 
-        counter += nrCores*4;
-        if ((counter % (nrCores * 4 * 10000)) == 0) {
+        counter += nrCores * N * 4;
+        if ((loopcounter % ((counterstop/(N * nrCores * 4)) / (int)( 1 / ((float)(PERCENTAGEINTERVAL) / 100 ) ))) == 0) {
             printLoadingBar(counter, counterstop, start_timer.time_since_epoch().count());
         }
+        loopcounter++;
     }
     cudaEventRecord(stop);
     printLoadingBar(counter, counterstop, start_timer.time_since_epoch().count());
@@ -158,8 +160,13 @@ int main() {
     float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
 
-    printf("Ran %lld simulations resulting in %lld passes taking %fs \n", counter, cpu_pass_counter[0], milliseconds/1000);
-    printf("Averaged: %i rolls per second", (int)(counter/(milliseconds/1000)));
+    printf("Ran %lld simulations resulting in %lld d%i rolls above %i taking %fs \n", counter, cpu_pass_counter[0], MAX, cpu_num_to_pass[0], milliseconds/1000);
+    printf("Averaged: %lld rolls per second", (long long int)(counter / (milliseconds/1000)));
+
+    do
+    {
+        std::cout << '\n' << "Enter any key to continue...";
+    } while (std::cin.get() != '\n');
 
     return 0;
 }
