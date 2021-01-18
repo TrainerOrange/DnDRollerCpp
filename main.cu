@@ -6,9 +6,11 @@
 #include <curand_kernel.h>
 #include <iostream>
 #include <random>
+#include <chrono>
+#include <ctime>
 
-#define N 8704 * 2048
-#define R 2
+#define N 8704
+#define R 1
 #define MAX 20
 
 /* this GPU kernel function is used to initialize the random states */
@@ -23,9 +25,9 @@ __global__ void init(unsigned int seed, curandState_t* states) {
 }
 
 /* this GPU kernel takes an array of states, and an array of ints, and puts a random int into each */
-__global__ void randoms(curandState_t* states, int8_t* numbers) {
+__global__ void randoms(curandState_t* states, uint8_t* numbers) {
     /* curand works like rand - except that it takes a state as a parameter */
-    int32_t randInt = curand(&states[blockIdx.x]);
+    uint32_t randInt = curand(&states[blockIdx.x]);
     numbers[4 * blockIdx.x]     = ((randInt & 0xFF000000UL) >> 24)  % MAX + 1;
     numbers[4 * blockIdx.x + 1] = ((randInt & 0x00FF0000UL) >> 16)  % MAX + 1;
     numbers[4 * blockIdx.x + 2] = ((randInt & 0x0000FF00UL) >> 8 )  % MAX + 1;
@@ -33,41 +35,45 @@ __global__ void randoms(curandState_t* states, int8_t* numbers) {
 }
 
 /* this GPU kernel takes an array of ints and adds 1 to the passcounter if they're greater than or equal to the given int */
-__global__ void passcheck(int64_t* passcounter, const int8_t* numberstopass, const int8_t* numbers) {
-    if (numbers[blockIdx.x] == numberstopass[0] || numbers[blockIdx.x] == numberstopass[1])
-        {
-            passcounter[0] += 1;
-//            printf("Number: %i \n", numbers[blockIdx.x]);
-//            printf("counted! \n");
-        }
+__global__ void passcheck(unsigned long long int* passcounter, int8_t* numberstopass, const uint8_t* numbers) {
+    if (numbers[blockIdx.x * blockDim.x + threadIdx.x] >= numberstopass[0]) { atomicAdd(passcounter, 1); }
+}
+
+void printLoadingBar(unsigned long long int rolled, unsigned long long int counterStop, double start_time ) {
+    printf("Rolled: %lld%% ", (rolled * 100)/counterStop);
+    auto end = std::chrono::system_clock::now().time_since_epoch().count();
+    double diff = end - start_time;
+    printf(": %i rolls per second \n", (int)(((double)rolled * 10000000) / diff));
 }
 
 int main() {
-    int64_t counter = 0;
-    auto start_time = clock();
-
     // After how many rolls should you stop
-    int64_t counterstop = ((int64_t) LONG_MAX) * 4;
+    unsigned long long int counter = 0;
+    unsigned long long int counterstop = (unsigned long long int)(INT32_MAX/512) * N;
+
+    // Cuda performance metrics
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
 
 //    /* allocate an array of int8_t on the CPU and GPU */
-//    int8_t cpu_nums[N * 4];
-    int8_t* gpu_nums;
-    cudaMalloc((void **) &gpu_nums, N * 4 * sizeof(int8_t));
+//    uint8_t cpu_nums[N * 4];
+    uint8_t* gpu_nums;
+    cudaMalloc((void **) &gpu_nums, N * 4 * sizeof(uint8_t));
 
     /* allocate an array of int8_t on the CPU and GPU */
-    int64_t cpu_pass_counter[1];
+    unsigned long long int cpu_pass_counter[1];
     cpu_pass_counter[0] = 0;
-    int64_t* gpu_pass_counter;
-    cudaMalloc((void **) &gpu_pass_counter, 1 * sizeof(int64_t));
-    cudaMemcpy(gpu_pass_counter, cpu_pass_counter, 1 * sizeof(int64_t), cudaMemcpyHostToDevice);
+    unsigned long long int* gpu_pass_counter;
+    cudaMalloc((void **) &gpu_pass_counter, 1 * sizeof(unsigned long long int));
+    cudaMemcpy(gpu_pass_counter, cpu_pass_counter, 1 * sizeof(unsigned long long int), cudaMemcpyHostToDevice);
 
-    /* allocate an array of int8_t on the CPU and GPU */
-    int8_t cpu_num_to_roll[R];
-    cpu_num_to_roll[0] = 19;
-    cpu_num_to_roll[1] = 20;
+    /* allocate an array of int8_t on the CPU and GPU of numbers that should be checked against */
+    int8_t cpu_num_to_pass[R];
+    cpu_num_to_pass[0] = 11;
     int8_t* gpu_num_to_roll;
     cudaMalloc((void **) &gpu_num_to_roll, R * sizeof(int8_t));
-    cudaMemcpy(gpu_num_to_roll, cpu_num_to_roll, R * sizeof(int8_t), cudaMemcpyHostToDevice);
+    cudaMemcpy(gpu_num_to_roll, cpu_num_to_pass, R * sizeof(int8_t), cudaMemcpyHostToDevice);
 
     cudaDeviceSynchronize();
 
@@ -75,21 +81,29 @@ int main() {
     curandState_t* states;
     cudaMalloc((void **) &states, N * sizeof(curandState_t));
 
-    while (counter < counterstop) {
-        /* invoke the GPU to initialize all of the random states */
-        init<<<N, 1>>>(counter, states);
+    /* invoke the GPU to initialize all of the random states */
+    init<<<N, 1>>>(time(nullptr), states);
 
+    auto start_timer = std::chrono::system_clock::now();
+    printLoadingBar(counter, counterstop, start_timer.time_since_epoch().count());
+    cudaEventRecord(start);
+    while (counter < counterstop) {
         /* invoke the kernel to get some random numbers */
         randoms<<<N, 1>>>(states, gpu_nums);
-
-        passcheck<<<N * 4, 1>>>(gpu_pass_counter, gpu_num_to_roll, gpu_nums);
+        passcheck<<<N, 4>>>(gpu_pass_counter, gpu_num_to_roll, gpu_nums);
 
         /* copy the random numbers back */
-        // cudaMemcpy(cpu_nums, gpu_nums, N * 4 * sizeof(int8_t), cudaMemcpyDeviceToHost);
+//        cudaMemcpy(cpu_nums, gpu_nums, N * 4 * sizeof(int8_t), cudaMemcpyDeviceToHost);
+//        cudaMemcpy(cpu_pass_counter, gpu_pass_counter, 1 * sizeof(int64_t), cudaMemcpyDeviceToHost);
 
         counter += N*4;
+        if ((counter % ((N * 4) * 10000)) == 0) {
+            printLoadingBar(counter, counterstop, start_timer.time_since_epoch().count());
+        }
     }
-    cudaMemcpy(cpu_pass_counter, gpu_pass_counter, 1 * sizeof(int64_t), cudaMemcpyDeviceToHost);
+    cudaEventRecord(stop);
+    printLoadingBar(counter, counterstop, start_timer.time_since_epoch().count());
+    cudaMemcpy(cpu_pass_counter, gpu_pass_counter, 1 * sizeof(unsigned long long int), cudaMemcpyDeviceToHost);
 
     /* free memory from GPU */
     cudaFree(states);
@@ -97,8 +111,13 @@ int main() {
     cudaFree(gpu_pass_counter);
     cudaFree(gpu_num_to_roll);
 
-    auto end_time = clock();
-    printf("Ran %lld simulations resulting in %lld crits taking %fs", counter, cpu_pass_counter[0], (float)(end_time - start_time)/1000);
+    cudaEventSynchronize(stop);
+    float milliseconds = 0;
+    cudaEventElapsedTime(&milliseconds, start, stop);
+
+    printf("Ran %lld simulations resulting in %lld passes taking %fs \n", counter, cpu_pass_counter[0], milliseconds/1000);
+    printf("Averaged: %i rolls per second", (int)(counter/(milliseconds/1000)));
 
     return 0;
 }
+
