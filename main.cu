@@ -7,9 +7,9 @@
 #include <iostream>
 #include <random>
 #include <chrono>
-#include <ctime>
+#include "cuda_runtime_api.h"
 
-#define N 8704
+#define N 1
 #define R 1
 #define MAX 20
 
@@ -46,10 +46,52 @@ void printLoadingBar(unsigned long long int rolled, unsigned long long int count
     printf(": %i rolls per second \n", (int)(((double)rolled * 10000000) / diff));
 }
 
+// you must first call the cudaGetDeviceProperties() function, then pass
+// the devProp structure returned to this function:
+int getSPcores(cudaDeviceProp devProp)
+{
+    int cores = 0;
+    int mp = devProp.multiProcessorCount;
+    switch (devProp.major){
+        case 2: // Fermi
+            if (devProp.minor == 1) cores = mp * 48;
+            else cores = mp * 32;
+            break;
+        case 3: // Kepler
+            cores = mp * 192;
+            break;
+        case 5: // Maxwell
+            cores = mp * 128;
+            break;
+        case 6: // Pascal
+            if ((devProp.minor == 1) || (devProp.minor == 2)) cores = mp * 128;
+            else if (devProp.minor == 0) cores = mp * 64;
+            else printf("Unknown device type\n");
+            break;
+        case 7: // Volta and Turing
+            if ((devProp.minor == 0) || (devProp.minor == 5)) cores = mp * 64;
+            else printf("Unknown device type\n");
+            break;
+        case 8: // Ampere
+            if (devProp.minor == 0) cores = mp * 64;
+            else if (devProp.minor == 6) cores = mp * 128;
+            else printf("Unknown device type\n");
+            break;
+        default:
+            printf("Unknown device type\n");
+            break;
+    }
+    return cores;
+}
+
 int main() {
+    cudaDeviceProp cudaDeviceProp;
+    cudaGetDeviceProperties(&cudaDeviceProp, 1);
+    int nrCores = getSPcores(cudaDeviceProp);
+
     // After how many rolls should you stop
     unsigned long long int counter = 0;
-    unsigned long long int counterstop = (unsigned long long int)(INT32_MAX/512) * N;
+    unsigned long long int counterstop = (unsigned long long int)(INT32_MAX/512) *N * nrCores;
 
     // Cuda performance metrics
     cudaEvent_t start, stop;
@@ -59,7 +101,7 @@ int main() {
 //    /* allocate an array of int8_t on the CPU and GPU */
 //    uint8_t cpu_nums[N * 4];
     uint8_t* gpu_nums;
-    cudaMalloc((void **) &gpu_nums, N * 4 * sizeof(uint8_t));
+    cudaMalloc((void **) &gpu_nums,N * nrCores * 4 * sizeof(uint8_t));
 
     /* allocate an array of int8_t on the CPU and GPU */
     unsigned long long int cpu_pass_counter[1];
@@ -70,7 +112,7 @@ int main() {
 
     /* allocate an array of int8_t on the CPU and GPU of numbers that should be checked against */
     int8_t cpu_num_to_pass[R];
-    cpu_num_to_pass[0] = 11;
+    cpu_num_to_pass[0] = 20;
     int8_t* gpu_num_to_roll;
     cudaMalloc((void **) &gpu_num_to_roll, R * sizeof(int8_t));
     cudaMemcpy(gpu_num_to_roll, cpu_num_to_pass, R * sizeof(int8_t), cudaMemcpyHostToDevice);
@@ -79,7 +121,7 @@ int main() {
 
     /* allocate space on the GPU for the random states */
     curandState_t* states;
-    cudaMalloc((void **) &states, N * sizeof(curandState_t));
+    cudaMalloc((void **) &states,N * nrCores * sizeof(curandState_t));
 
     /* invoke the GPU to initialize all of the random states */
     init<<<N, 1>>>(time(nullptr), states);
@@ -93,10 +135,10 @@ int main() {
         passcheck<<<N, 4>>>(gpu_pass_counter, gpu_num_to_roll, gpu_nums);
 
         /* copy the random numbers back */
-//        cudaMemcpy(cpu_nums, gpu_nums, N * 4 * sizeof(int8_t), cudaMemcpyDeviceToHost);
+//        cudaMemcpy(cpu_nums, gpu_nums,N * nrCores * 4 * sizeof(int8_t), cudaMemcpyDeviceToHost);
 //        cudaMemcpy(cpu_pass_counter, gpu_pass_counter, 1 * sizeof(int64_t), cudaMemcpyDeviceToHost);
 
-        counter += N*4;
+        counter +=N * nrCores*4;
         if ((counter % ((N * 4) * 10000)) == 0) {
             printLoadingBar(counter, counterstop, start_timer.time_since_epoch().count());
         }
